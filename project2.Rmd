@@ -1,0 +1,274 @@
+---
+title: 'Analyzing U.S. Storm Data: Exploring Impacts on Public Health and the Economy'
+author: "zhengyu yao"
+date: "2025-05-20"
+output:
+  html_document:
+    keep_md: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+----
+
+## Synopsis:  
+This report analyzes the impacts of severe weather events on public health and the economy using NOAA's Storm Database. We load and clean the raw CSV data, then evaluate each event type based on fatalities and injuries to assess public health risks. We also calculate and rank economic losses by event type. Visualizations are used to highlight the most harmful weather types. The analysis is performed in R, using packages like `dplyr` for data manipulation and `ggplot2` for visualization. The goal is to help government managers understand the risks associated with different weather events and prioritize resources accordingly.
+
+## Data Processing
+
+### Load libraries
+```{r load-library, message=FALSE}
+library(tidyverse)
+```
+
+### Download and load the data
+
+The data for this assignment was downloaded from the course website. The events in the database start in the year 1950 and end in November 2011. 
+
+- [Storm Data](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2) [47Mb]
+
+Here you will find how some of the variables are constructed/defined.
+
+- National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
+
+- National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)
+
+```{r loading, cache=TRUE}
+url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+file_path <- "StormData.csv.bz2"
+if (!file.exists(file_path)) {
+  download.file(url, file_path, mode = "wb")
+}
+raw_data <- read.csv(file_path)
+```
+
+### Display dataset basic information
+
+The original dataset imported for analysis consists of 902,297 observations and 37 variables.
+
+```{r display dataset,cache=TRUE}
+raw_data <- as_tibble(raw_data)
+raw_data
+```
+
+### Dataset Reduction and Filtering
+
+To streamline the analysis and improve computational efficiency, the dataset will be restricted to a subset of relevant variables, and observations with non-positive values (`value ≤ 0`) will be omitted.
+
+```{r subset,cache=TRUE}
+select <- c("EVTYPE", "FATALITIES", "INJURIES", "PROPDMG", "PROPDMGEXP", 
+            "CROPDMG", "CROPDMGEXP", "BGN_DATE", "END_DATE", "STATE")
+tidy_data <- raw_data %>%
+  filter(EVTYPE != "?",
+         FATALITIES > 0 | INJURIES > 0 | PROPDMG > 0 | CROPDMG > 0) %>%
+  select(all_of(select))
+dim(tidy_data)
+```
+
+After processing, the dataset consists of 254,632 observations and 10 variables.
+
+### Standardization of event types
+
+The current tidy dataset contains a total of 487 unique event type values.
+
+```{r}
+length(unique(tidy_data$EVTYPE))
+```
+
+Examination of the Event Type variable uncovered multiple inconsistent representations
+of the same underlying event type. These inconsistencies included variations in case, 
+pluralization, and misspellings.
+
+A normalization process was therefore applied, which involved converting all entries
+to uppercase and merging similar event types into standardized categories.
+
+
+```{r standardization, cache=TRUE}
+# convert event type to upper
+tidy_data$EVTYPE <- toupper(tidy_data$EVTYPE)
+# Map regex patterns to target categories
+pattern_mapping <- list(
+  'AVALANCHE' = '.*AVALANCE.*',
+  'BLIZZARD' = '.*BLIZZARD.*',
+  'CLOUD' = '.*CLOUD.*',
+  'COLD' = c('.*COLD.*', '.*FREEZ.*', '.*FROST.*', '.*ICE.*', 
+             '.*LOW TEMPERATURE RECORD.*', '.*LO.*TEMP.*'),
+  'DRY' = '.*DRY.*',
+  'DUST' = '.*DUST.*',
+  'FIRE' = '.*FIRE.*',
+  'FLOOD' = '.*FLOOD.*',
+  'FOG' = '.*FOG.*',
+  'HAIL' = '.*HAIL.*',
+  'HEAT' = c('.*HEAT.*', '.*WARM.*', '.*HIGH.*TEMP.*', '.*RECORD HIGH TEMPERATURES.*'),
+  'HYPOTHERMIA/EXPOSURE' = '.*HYPOTHERMIA.*',
+  'LANDSLIDE' = '.*LANDSLIDE.*',
+  'LIGHTNING' = c('^LIGHTNING.*', '^LIGNTNING.*', '^LIGHTING.*'),
+  'MICROBURST' = '.*MICROBURST.*',
+  'MUDSLIDE' = c('.*MUDSLIDE.*', '.*MUD SLIDE.*'),
+  'RAIN' = '.*RAIN.*',
+  'RIP CURRENT' = '.*RIP CURRENT.*',
+  'STORM' = '.*STORM.*',
+  'SUMMARY' = '.*SUMMARY.*',
+  'TORNADO' = c('.*TORNADO.*', '.*TORNDAO.*', '.*LANDSPOUT.*', '.*WATERSPOUT.*'),
+  'SURF' = '.*SURF.*',
+  'VOLCANIC' = '.*VOLCANIC.*',
+  'WET' = '.*WET.*',
+  'WIND' = '.*WIND.*',
+  'WINTER' = c('.*WINTER.*', '.*WINTRY.*', '.*SNOW.*')
+)
+# Apply map
+for (category in names(pattern_mapping)) {
+  patterns <- pattern_mapping[[category]]
+  for (pattern in patterns) {
+    tidy_data$EVTYPE <- gsub(pattern, category, tidy_data$EVTYPE, ignore.case = TRUE)
+  }
+}
+# Convert event type to a categorical (factor) variable
+tidy_data$EVTYPE <- as.factor(tidy_data$EVTYPE)
+```
+
+After processing, the number of unique Event Type values were reduced to 81.
+
+```{r}
+length(unique(tidy_data$EVTYPE))
+```
+
+### Clean Economic Data
+
+The PROPDMGEXP and CROPDMGEXP columns were cleaned and standardized to enable accurate
+calculation of property and crop damage costs. As part of this process, two new 
+variables — PROP_COST and CROP_COST — were created to store the respective monetary
+estimates of damage.
+
+```{r damage costs}
+# function to get multiplier factor
+getMultiplier <- function(exp) {
+    exp <- toupper(exp);
+    if (exp == "")  return (10^0);
+    if (exp == "-") return (10^0);
+    if (exp == "?") return (10^0);
+    if (exp == "+") return (10^0);
+    if (exp == "0") return (10^0);
+    if (exp == "1") return (10^1);
+    if (exp == "2") return (10^2);
+    if (exp == "3") return (10^3);
+    if (exp == "4") return (10^4);
+    if (exp == "5") return (10^5);
+    if (exp == "6") return (10^6);
+    if (exp == "7") return (10^7);
+    if (exp == "8") return (10^8);
+    if (exp == "9") return (10^9);
+    if (exp == "H") return (10^2);
+    if (exp == "K") return (10^3);
+    if (exp == "M") return (10^6);
+    if (exp == "B") return (10^9);
+    return (NA);
+}
+# calculate property damage and crop damage costs (in billions)
+tidy_data$PROP_COST <- with(tidy_data, as.numeric(PROPDMG) * sapply(PROPDMGEXP, getMultiplier))/10^9
+tidy_data$CROP_COST <- with(tidy_data, as.numeric(CROPDMG) * sapply(CROPDMGEXP, getMultiplier))/10^9
+```
+
+### Summarize Data
+
+Generate a summary dataset containing health impact data (including fatalities and injuries).  
+Sort the results in descending order based on the magnitude of health impact.
+
+```{r health-summary}
+health_data <- tidy_data %>%
+  mutate(HEALTH_IMPACT = FATALITIES + INJURIES) %>%
+  group_by(EVENT_TYPE = EVTYPE) %>%
+  summarise(HEALTH_IMPACT = sum(HEALTH_IMPACT, na.rm = TRUE)) %>%
+  arrange(desc(HEALTH_IMPACT))
+```
+
+
+Generate a summary dataset containing damage impact costs (including property damage and crop damage).  
+Sort the results in descending order based on the total damage cost.
+
+```{r damage-summary, echo = TRUE}
+damage_data <- tidy_data %>%
+  mutate(DAMAGE_IMPACT = PROP_COST + CROP_COST) %>%
+  group_by(EVENT_TYPE = EVTYPE) %>%
+  summarise(DAMAGE_IMPACT = sum(DAMAGE_IMPACT, na.rm = TRUE)) %>%
+  arrange(desc(DAMAGE_IMPACT))
+```
+
+## Results
+
+### Weather Events with the Greatest Impact on Public Health
+
+To understand which weather events have the most significant impact on public health, we analyzed fatalities and injuries caused by various types of severe weather. Below are the top 10 most harmful weather events in terms of their effect on public health in the U.S.
+
+```{r}
+head(health_data, 10)
+```
+
+The following plot visually represents these findings, highlighting the event types that lead to the highest number of combined fatalities and injuries.
+
+```{r}
+health_data %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(EVENT_TYPE, HEALTH_IMPACT), y = HEALTH_IMPACT, fill = EVENT_TYPE)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Top 10 Weather Events Most Harmful to\nPopulation Health",
+    x = "Event Type",
+    y = "Total Fatalities and Injuries"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11)
+  ) +
+  scale_fill_brewer(palette = "Set3")
+```
+
+### Weather Events Causing the Highest Economic Losses
+
+In examining the economic impacts of severe weather, property and crop damage were key indicators. The analysis below showcases the top 10 weather events leading to the greatest economic losses due to property and crop damage within the U.S.
+
+```{r}
+head(damage_data)
+```
+
+This bar chart provides a visual summary of the weather events associated with the highest total costs from property and crop damages.
+
+```{r}
+damage_data %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(EVENT_TYPE, DAMAGE_IMPACT), y = DAMAGE_IMPACT, fill = EVENT_TYPE)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Top 10 Weather Events with\nGreatest Economic Consequences",
+    x = "Event Type",
+    y = "Total Property / Crop Damage Cost\n(in Billions)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 11)
+  ) +
+  scale_fill_brewer(palette = "Set3")
+```
+
+### Conclusion
+
+From this analysis, supported by the data and graphical representations provided, we can conclude:
+
+- **Which weather events are most detrimental to public health?**
+  
+  Tornadoes cause the highest number of fatalities and injuries.
+  
+- **Which weather events result in the largest economic losses?**
+  
+  Floods lead to the greatest costs related to property and crop damage.
